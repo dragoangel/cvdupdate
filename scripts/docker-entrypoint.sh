@@ -19,18 +19,22 @@ if [ $# -eq 0 ]; then
 
     echo "Adding crontab entry"
     if [ "${USER_ID}" -ne "0" ]; then
-        crontab -l | {
-            cat
-            echo "${CRON:-"30 */4 * * *"} /usr/sbin/gosu cvdupdate /usr/local/bin/cvdupdate update >/proc/1/fd/1 2>/proc/1/fd/2"
-            echo "@reboot /usr/sbin/gosu cvdupdate /usr/local/bin/cvdupdate update >/proc/1/fd/1 2>/proc/1/fd/2"
-        } | crontab -
+        timed_command="${CRON:-"30 */4 * * *"} /usr/sbin/gosu cvdupdate /usr/local/bin/cvdupdate update >/proc/1/fd/1 2>/proc/1/fd/2"
+        reboot_command="@reboot /usr/sbin/gosu cvdupdate /usr/local/bin/cvdupdate update >/proc/1/fd/1 2>/proc/1/fd/2"
     else
-        crontab -l | {
-            cat
-            echo "${CRON:-"30 */4 * * *"} /usr/local/bin/cvdupdate update >/proc/1/fd/1 2>/proc/1/fd/2"
-            echo "@reboot /usr/local/bin/cvdupdate update >/proc/1/fd/1 2>/proc/1/fd/2"
-        } | crontab -
+        timed_command="${CRON:-"30 */4 * * *"} /usr/local/bin/cvdupdate update >/proc/1/fd/1 2>/proc/1/fd/2"
+        reboot_command="@reboot /usr/local/bin/cvdupdate update >/proc/1/fd/1 2>/proc/1/fd/2"
     fi
+
+    new_crontab="$(crontab -l || echo "")"
+    if ! echo "$new_crontab" | grep -qF "$timed_command"; then
+        new_crontab="$new_crontab\n$timed_command"
+    fi
+    if ! echo "$new_crontab" | grep -qF "$reboot_command"; then
+        new_crontab="$new_crontab\n$reboot_command"
+    fi
+    echo -e "$new_crontab" | crontab -
+
     cron -f
 else
     if [ "${USER_ID}" -ne "0" ]; then
