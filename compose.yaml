@@ -7,14 +7,24 @@ services:
     environment:
       - CRON=30 */4 * * *
       - USER_ID=0
+      - ENABLE_LOGS=true
+      - LOGS_TO_KEEP=10
+      # REMOVE_DATABASES - comma-separated list of databases names to remove on startup,
+      # f.e: custom_db1.hdb,custom_db2.hdb
+      - REMOVE_DATABASES=
+      # EXTRA_DATABASES - comma-separated list of additional databases to add on startup,
+      # f.e: custom_db1.hdb:http://mirror.example.com/custom_db1.hdb,custom_db2.hdb:http://mirror.example.com/custom_db2.hdb
+      - EXTRA_DATABASES=
     volumes:
       - database:/cvdupdate/database
       - log:/cvdupdate/logs
+
   ## Apache instance to serve the mirror
   apache:
     image: httpd:2.4
     volumes:
-      - database:/usr/local/apache2/htdocs
+      - ./compose/httpd.conf:/usr/local/apache2/conf/httpd.conf:ro
+      - database:/cvdupdate/database:ro
     ports:
       - 8000:80
 
