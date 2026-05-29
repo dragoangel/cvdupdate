@@ -41,6 +41,24 @@ def test_alternate_config_locations(revert_homedir, tmp_path):
     assert not default_cvdupdate_dir.exists()
 
 
+def test_custom_config_colocates_state_file(revert_homedir, tmp_path):
+    ''' A custom config path without an explicit state file should default the
+    state file next to that config (as in <= 1.2.0), not in $HOME/.cvdupdate. '''
+    default_cvdupdate_dir = Path.home() / '.cvdupdate'
+    assert not default_cvdupdate_dir.exists()
+
+    config_dir = tmp_path / 'altconfig'
+    config_dir.mkdir()
+    config_file_path = config_dir / 'config.json'
+
+    c = CVDUpdate(config=str(config_file_path))
+
+    assert c.config['state_file'] == str(config_dir / 'state.json')
+    assert (config_dir / 'state.json').exists()
+    # the default ~/.cvdupdate must not be created for a custom config path
+    assert not default_cvdupdate_dir.exists()
+
+
 def test_logs_enabled(revert_homedir, tmp_path):
     ''' Test that when logs_enabled=True, a dated log file is created in the logs directory '''
     logs_dir_path = tmp_path / 'logs'
@@ -113,8 +131,8 @@ def test_v1_config_migrates_successfully(revert_homedir):
     assert a.config['cdiffs_rotate']  == old_config['rotate cdiffs']
     assert a.config['cdiffs_to_keep'] == old_config['# cdiffs to keep']
 
-    # --- new keys must be filled in from defaults ---
-    assert a.config['state_file'] == CVDUpdate.default_config['state_file']
+    # --- state_file defaults next to the config when not set ---
+    assert a.config['state_file'] == str(default_cvdupdate_dir / 'state.json')
 
     # --- config must have exactly the current key set ---
     assert a.config.keys() == CVDUpdate.default_config.keys()

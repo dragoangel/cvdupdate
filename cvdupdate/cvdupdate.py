@@ -80,9 +80,9 @@ class CVDUpdate:
         "cdiffs_rotate":  True,
         "cdiffs_to_keep": 30,
 
-        # Keep the state file out of the served database directory so `cvd serve`
-        # (and any external HTTP server) doesn't expose state metadata.
-        "state_file":     str(Path.home() / ".cvdupdate" / "state.json"),
+        # Resolved at load time to "<config dir>/state.json" when not set, so it
+        # stays next to the config (and out of the served database directory).
+        "state_file":     "",
     }
 
     default_state: dict = {
@@ -253,11 +253,15 @@ class CVDUpdate:
             self.config = copy.deepcopy(self.default_config)
             need_save = True
 
-        # Load state early to apply migration in one block.
-        # Support both old ("state file") and new ("state_file") key name.
-        state_file_str = (self.config.get("state_file")
-                          or self.config.get("state file")
-                          or self.default_config["state_file"])
+        # Resolve the state file location and load state early to apply
+        # migration in one block. Support both old ("state file") and new
+        # ("state_file") key names. When not configured, default it next to the
+        # config file (matches <= 1.2.0: custom --config paths get a colocated
+        # state file) and out of the served database directory.
+        state_file_str = self.config.get("state_file") or self.config.get("state file")
+        if not state_file_str:
+            state_file_str = str(self.config_path.parent / "state.json")
+        self.config["state_file"] = state_file_str
         state_path = Path(state_file_str)
         if state_path.exists():
             with state_path.open('r') as st_fi:

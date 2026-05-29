@@ -316,18 +316,25 @@ def config_set(ctx, config, verbose, nameservers, max_retries, logs_enabled, log
         ("--logdir", logdir, "--logs-directory", logs_directory),
         ("--dbdir", dbdir, "--dbs-directory", dbs_directory),
     ):
-        if old_val != "":
-            click.echo(
-                f"Warning: '{old_flag}' is deprecated; use '{new_flag}' instead.",
-                err=True,
-            )
+        if old_val == "":
+            continue
+        click.echo(
+            f"Warning: '{old_flag}' is deprecated; use '{new_flag}' instead.",
+            err=True,
+        )
+        if new_flag == "--nameservers":
             if new_val == "":
-                if new_flag == "--nameservers":
-                    nameservers = old_val
-                elif new_flag == "--logs-directory":
-                    logs_directory = old_val
-                else:
-                    dbs_directory = old_val
+                nameservers = old_val
+        elif new_flag == "--logs-directory":
+            if new_val == "":
+                logs_directory = old_val
+            # The old --logdir implied file logging was enabled; preserve that
+            # unless the user explicitly set --logs-enabled/--no-logs-enabled.
+            if logs_enabled is None:
+                logs_enabled = True
+        else:  # --dbs-directory
+            if new_val == "":
+                dbs_directory = old_val
 
     no_options_set = (
         nameservers == ""
