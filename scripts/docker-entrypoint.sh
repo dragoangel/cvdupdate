@@ -18,6 +18,8 @@ if [ $# -eq 0 ]; then
     set -e
 
     echo "Adding crontab entry"
+    cron_start_marker="# cvdupdate managed cron start"
+    cron_end_marker="# cvdupdate managed cron end"
     if [ "${USER_ID}" -ne "0" ]; then
         timed_command="${CRON:-"30 */4 * * *"} /usr/sbin/gosu cvdupdate /usr/local/bin/cvdupdate update >/proc/1/fd/1 2>/proc/1/fd/2"
         reboot_command="@reboot /usr/sbin/gosu cvdupdate /usr/local/bin/cvdupdate update >/proc/1/fd/1 2>/proc/1/fd/2"
@@ -25,15 +27,25 @@ if [ $# -eq 0 ]; then
         timed_command="${CRON:-"30 */4 * * *"} /usr/local/bin/cvdupdate update >/proc/1/fd/1 2>/proc/1/fd/2"
         reboot_command="@reboot /usr/local/bin/cvdupdate update >/proc/1/fd/1 2>/proc/1/fd/2"
     fi
-
-    new_crontab="$(crontab -l || echo "")"
-    if ! echo "$new_crontab" | grep -qF "$timed_command"; then
-        new_crontab="$new_crontab\n$timed_command"
-    fi
-    if ! echo "$new_crontab" | grep -qF "$reboot_command"; then
-        new_crontab="$new_crontab\n$reboot_command"
-    fi
-    echo -e "$new_crontab" | crontab -
+    unmanaged_crontab="$(
+        crontab -l 2>/dev/null \
+            | awk -v start="$cron_start_marker" -v end="$cron_end_marker" '
+                $0 == start { managed = 1; next }
+                $0 == end { managed = 0; next }
+                managed { next }
+                /\/usr\/local\/bin\/cvdupdate update >\/proc\/1\/fd\/1 2>\/proc\/1\/fd\/2$/ { next }
+                { print }
+            ' || true
+    )"
+    {
+        if [ -n "$unmanaged_crontab" ]; then
+            printf '%s\n' "$unmanaged_crontab"
+        fi
+        printf '%s\n' "$cron_start_marker"
+        printf '%s\n' "$timed_command"
+        printf '%s\n' "$reboot_command"
+        printf '%s\n' "$cron_end_marker"
+    } | crontab -
 
     cron -f
 else
