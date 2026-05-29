@@ -32,7 +32,9 @@ limitations under the License.
 import json as _json
 import logging
 import os
+import posixpath
 import sys
+from urllib.parse import unquote
 import click
 import colorlog
 try:
@@ -61,6 +63,38 @@ def _package_version() -> str:
         return _get_version('cvdupdate')
     except PackageNotFoundError:
         return '0.0'
+
+
+class MirrorRequestHandler(RangeRequestHandler):
+    """
+    RangeRequestHandler that hides dot-prefixed files and directories so the
+    `serve` test mirror doesn't expose hidden files (e.g. `.state.json`).
+    """
+
+    def send_head(self):
+        # Decode %xx (so /%2egit can't bypass the check) and normalize, then
+        # block any path segment that names a dotfile/dotdir — including files
+        # inside one (e.g. /.git/config), not just a dot-prefixed final segment.
+        # '.' and '..' are navigation segments, not hidden names.
+        path = posixpath.normpath(unquote(self.path.split('?', 1)[0].split('#', 1)[0]))
+        segments = [seg for seg in path.split('/') if seg not in ('.', '..')]
+        if any(seg.startswith('.') for seg in segments):
+            self.send_error(404, "File not found")
+            return None
+        return super().send_head()
+
+    def list_directory(self, path):
+        # Filter dot-prefixed entries out of auto-generated directory listings.
+        try:
+            names = os.listdir(path)
+        except OSError:
+            return super().list_directory(path)
+        original_listdir = os.listdir
+        os.listdir = lambda _p: [n for n in names if not n.startswith('.')]
+        try:
+            return super().list_directory(path)
+        finally:
+            os.listdir = original_listdir
 
 
 class AliasedGroup(click.Group):
@@ -174,6 +208,24 @@ def db_status(config: str, verbose: bool, use_json: bool, db: str):
                 sys.exit(1)
 
 
+@cli.command("show", hidden=True)
+@click.pass_context
+@click.option("--config", "-c", type=click.Path(), required=False, default="", help="Config path.")
+@click.option("--verbose", "-V", is_flag=True, default=False, help="Verbose output.")
+@click.option("--json", "use_json", is_flag=True, default=False, help="Output as JSON.")
+@click.argument("db", required=False, default="")
+def db_show_deprecated(ctx, config: str, verbose: bool, use_json: bool, db: str):
+    """
+    (Deprecated) Alias for 'status'. Use 'status' instead.
+    """
+    click.echo(
+        "Warning: 'show' is deprecated and will be removed in a future release; "
+        "use 'status' instead.",
+        err=True,
+    )
+    ctx.forward(db_status)
+
+
 @cli.command("update", aliases=["u"])
 @click.option("--config", "-c", type=click.Path(), required=False, default="", help="Config path.")
 @click.option("--verbose", "-V", is_flag=True, default=False, help="Verbose output.")
@@ -246,14 +298,37 @@ def config():
               help="Number of CDIFF files to keep.")
 @click.option("--state-file", type=click.Path(), default="",
               help="Path to the state file.")
+# Deprecated flag names from <= 1.2.0, kept as hidden aliases for backward compatibility.
+@click.option("--nameserver", type=str, default="", hidden=True)
+@click.option("--logdir", type=click.Path(), default="", hidden=True)
+@click.option("--dbdir", type=click.Path(), default="", hidden=True)
 def config_set(ctx, config, verbose, nameservers, max_retries, logs_enabled, logs_directory,
                logs_rotate, logs_to_keep, dbs_directory, cdiffs_rotate, cdiffs_to_keep,
-               state_file):
+               state_file, nameserver, logdir, dbdir):
     """
     Set configuration options.
 
     The default configuration directory is ~/.cvdupdate
     """
+    # Map deprecated (<= 1.2.0) flags onto their current equivalents.
+    for old_flag, old_val, new_flag, new_val in (
+        ("--nameserver", nameserver, "--nameservers", nameservers),
+        ("--logdir", logdir, "--logs-directory", logs_directory),
+        ("--dbdir", dbdir, "--dbs-directory", dbs_directory),
+    ):
+        if old_val != "":
+            click.echo(
+                f"Warning: '{old_flag}' is deprecated; use '{new_flag}' instead.",
+                err=True,
+            )
+            if new_val == "":
+                if new_flag == "--nameservers":
+                    nameservers = old_val
+                elif new_flag == "--logs-directory":
+                    logs_directory = old_val
+                else:
+                    dbs_directory = old_val
+
     no_options_set = (
         nameservers == ""
         and max_retries == 0
@@ -347,17 +422,20 @@ def clean_all(config: str, verbose: bool):
 @click.option("--config", "-c", type=click.Path(), required=False, default="", help="Config path.")
 @click.option("--verbose", "-V", is_flag=True, default=False, help="Verbose output.")
 @click.option("--update-interval-seconds", "-U", type=click.INT, required=False, default=0, help="Time in seconds before the next database update")
-@click.argument("port", type=int, required=False, default=0)
+@click.argument("port", type=int, required=False, default=8000)
 def serve(port: int, config: str, verbose: bool, update_interval_seconds: int):
     """
     Serve up the database directory for testing purposes only. Not a production quality server.
+
+    PORT defaults to 8000. Pass 0 to have the OS pick a random available port.
     """
     m = CVDUpdate(config=config, verbose=verbose)
     os.chdir(str(m.dbs_directory))
     auto_updater.start(update_interval_seconds)
 
-    RangeRequestHandler.protocol_version = 'HTTP/1.0'
-    httpd = HTTPServer(('', port), RangeRequestHandler)
+    # Don't expose hidden files (e.g. a dot-prefixed state file) over the mirror.
+    MirrorRequestHandler.protocol_version = 'HTTP/1.0'
+    httpd = HTTPServer(('', port), MirrorRequestHandler)
     actual_port = httpd.server_address[1]
     m.logger.info(f"Serving up {m.dbs_directory} on localhost:{actual_port}...")
     httpd.serve_forever()

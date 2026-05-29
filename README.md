@@ -72,7 +72,7 @@ cvd --help
 (optional) You may wish to customize where the databases are stored:
 
 ```bash
-cvd config set --dbdir <your www path>
+cvd config set --dbs-directory <your www path>
 ```
 
 Run this to download the latest database and associated CDIFF patch files:
@@ -90,6 +90,8 @@ Run this to serve up the database directory on `http://localhost:8000` so you ca
 ```bash
 cvd serve
 ```
+
+> _Tip_: `cvd serve` listens on port `8000` by default. Pass a port number to change it (e.g. `cvd serve 9000`), or pass `0` to have the OS pick a random available port (the chosen port is logged after binding).
 
 > _Disclaimer_: The `cvd serve` feature is not intended for production use, just for testing. You probably want to use a more robust HTTP server for production work.
 
@@ -113,33 +115,23 @@ Run `cvd update` as often as you need.  Maybe put it in a `cron` job.
 
 ### Cron Example
 
-Cron is a popular choice to automate frequent tasks on Linux / Unix systems.
+On Linux/Unix you can schedule updates with cron. Edit the crontab of the user CVD-Update should run as:
 
-1. Open a terminal running as the user which you want CVD-Update to run under, do the following:
+```bash
+crontab -e
+```
 
-   ```bash
-   crontab -e
-   ```
+Add a line such as:
 
-2. Press `i` to insert new text, and add this line:
+```bash
+30 */4 * * * /home/username/.local/bin/cvd update >/dev/null 2>&1
+```
 
-   ```bash
-   30 */4 * * * /bin/sh -c "~/.local/bin/cvd update &> /dev/null"
-   ```
+This runs `cvd update` at minute 30 of every 4th hour. Use the full path to `cvd` (run `which cvd` to find it), since cron does not load your shell's `PATH`.
 
-   Or instead of `~/`, you can do this, replacing `username` with your user name:
+Like FreshClam, CVD-Update first does a DNS version check and only downloads when something changed, so running it a few times a day is fine.
 
-   ```bash
-   30 */4 * * * /bin/sh -c "/home/username/.local/bin/cvd update &> /dev/null"
-   ```
-
-3. Press <Escape>, then type `:wq` and press <Enter> to write the file to disk and quit.
-
-**About these settings**:
-
-I selected `30 */4 * * *` to run at minute 30 past every 4th hour. CVD-Update uses a DNS check to do version checks before it attempts to download any files, just like FreshClam. Running CVD-Update more than once a day should not be an issue.
-
-CVD-Update will write logs to the `~/.cvdupdate/logs` directory, which is why I directed `stdout` and `stderr` to `/dev/null` instead of a log file. You can use the `cvd config set` command to customize the log directory if you like, or redirect `stdout` and `stderr` to a log file if you prefer everything in one log instead of separate daily logs.
+The example discards output with `>/dev/null 2>&1`; drop that to send output to cron's mail, or redirect to a file to keep it. For separate daily log files in `~/.cvdupdate/logs`, enable file logging with `cvd config set --logs-enabled` (use `--logs-directory` to change the location). These are rotated automatically, keeping the last 30 days by default (`--logs-to-keep`).
 
 ## Optional Functionality
 
@@ -147,21 +139,23 @@ CVD-Update will write logs to the `~/.cvdupdate/logs` directory, which is why I 
 
 DNS is required for CVD-Update to function properly (to gather the TXT record containing the current definition database version). You can select a specific nameserver to ensure said nameserver is used when querying the TXT record containing the current database definition version available
 
-1. Set the nameserver in the config. Eg:
+1. Set the nameservers in the config. Eg:
 
    ```bash
-   cvd config set --nameserver 208.67.222.222
+   cvd config set --nameservers 208.67.222.222
    ```
 
-2. Set the environment variable `CVDUPDATE_NAMESERVER`. Eg:
+2. Set the environment variable `CVDUPDATE_NAMESERVERS`. Eg:
 
    ```bash
-   CVDUPDATE_NAMESERVER="208.67.222.222" cvd update
+   CVDUPDATE_NAMESERVERS="208.67.222.222" cvd update
    ```
 
 The environment variable will take precedence over the nameserver config setting.
 
 Note:  Both options can be used to provide a comma-delimited list of nameservers to utilize for resolution.
+
+> _Note_: The `--nameserver` flag and the `CVDUPDATE_NAMESERVER` environment variable (singular) from CVD-Update &le; 1.2.0 are still accepted as deprecated aliases for `--nameservers` / `CVDUPDATE_NAMESERVERS`, but will be removed in a future release.
 
 ### Using a proxy
 
@@ -170,7 +164,7 @@ Depending on your type of proxy, you may be able to use CVD-Update with your pro
 First, set a custom domain name server to use the proxy:
 
 ```bash
-cvd config set --nameserver <proxy_ip>
+cvd config set --nameservers <proxy_ip>
 ```
 
 Then run CVD-Update like this:
@@ -226,16 +220,69 @@ cvd add --help
 cvd clean --help
 ```
 
-Print out the current list of databases.
+Print out the current list of database names.
 
 ```bash
-cvd list -V
+cvd list
 ```
+
+Print out the status (versions, last-checked times, URLs) of all databases, or a single one.
+
+```bash
+cvd status
+cvd status daily.cvd
+```
+
+> _Note_: `status` replaces the old `show` command. `show` still works as a deprecated alias and will be removed in a future release. Add `--json` to `status` (and `list`) for machine-readable output.
 
 Print out the config to see what it looks like.
 
 ```bash
 cvd config show
+```
+
+### Command aliases and JSON output
+
+The common commands have short aliases:
+
+| Command  | Alias |
+|----------|-------|
+| `status` | `s`   |
+| `update` | `u`   |
+| `list`   | `ls`  |
+| `remove` | `rm`  |
+| `config` | `cf`  |
+| `clean`  | `cl`  |
+
+`list`, `status`, and `config show` accept `--json` to emit machine-readable output for scripting:
+
+```bash
+cvd list --json                # JSON array of database names
+cvd status --json              # full state for all databases
+cvd status daily.cvd --json    # state for a single database
+cvd config show --json         # current configuration
+```
+
+### Configuration options
+
+`cvd config set` exposes every configuration option. Run with no options to see the help. Booleans use a `--flag` / `--no-flag` pair.
+
+| Option | Description |
+|--------|-------------|
+| `--nameservers`, `-n` | Comma-separated DNS nameservers used for the version check. |
+| `--max-retries` | Download retries, `1`–`5` (default `3`). |
+| `--logs-enabled` / `--no-logs-enabled` | Write log files to the logs directory (default: off). |
+| `--logs-directory`, `-l` | Log directory path. |
+| `--logs-rotate` / `--no-logs-rotate` | Rotate (delete) old log files (default: on). |
+| `--logs-to-keep` | Number of log files to keep when rotating (default `30`). |
+| `--dbs-directory`, `-d` | Database directory path (your HTTP server's `www` root). |
+| `--cdiffs-rotate` / `--no-cdiffs-rotate` | Rotate (delete) old CDIFF files (default: on). |
+| `--cdiffs-to-keep` | Number of CDIFFs to keep per database when rotating (default `30`). |
+| `--state-file` | Path to the state file (stores versions, UUID, and per-database metadata). |
+
+```bash
+# e.g. point databases at your web root and keep the state file alongside it
+cvd config set --dbs-directory /var/www/html/clamav --logs-enabled
 ```
 
 ### Do an update
@@ -249,7 +296,7 @@ cvd update -V
 List out the databases again:
 
 ```bash
-cvd list -V
+cvd status
 ```
 
 The print out the config again so you can see what's changed.
@@ -280,10 +327,16 @@ Maybe add an additional database that is not part of the default set of database
 cvd add linux.cvd https://database.clamav.net/linux.cvd
 ```
 
+To change the URL of a database that is already in the list, pass `--override`:
+
+```bash
+cvd add --override linux.cvd https://mirror.example.com/linux.cvd
+```
+
 List out the databases again:
 
 ```bash
-cvd list -V
+cvd status
 ```
 
 ### Serve it up, Test out FreshClam
@@ -300,55 +353,66 @@ DatabaseMirror http://localhost:8000
 
 ## Use docker
 
-Build docker image
+Build the image:
 
 ```bash
 docker build . --tag cvdupdate:latest
 ```
 
-Run image, that will automaticly update databases in folder `/srv/cvdupdate` and write logs to `/var/log/cvdupdate`
+Run it to keep the databases in a local `./database` directory updated on a schedule:
 
 ```bash
 docker run -d \
-  -v /srv/cvdupdate:/cvdupdate/database \
-  -v /var/log/cvdupdate:/cvdupdate/logs \
+  -v "$(pwd)/database:/cvdupdate/database" \
   cvdupdate:latest
 ```
 
-Run image, that will automaticly update databases in folder `/srv/cvdupdate`, write logs to `/var/log/cvdupdate` and set owner of files to user with ID 1000
+The container is configured with environment variables:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `CRON` | `30 */4 * * *` | Update schedule (see [Cron Example](#cron-example)). |
+| `USER_ID` | `0` | UID that owns the files and runs the updater; set non-zero to avoid running as root. |
+| `ENABLE_LOGS` | unset | Set to any value other than `false` to write log files to `/cvdupdate/logs`. |
+| `LOGS_TO_KEEP` | `30` | Number of daily log files to keep (positive integer). |
+| `EXTRA_DATABASES` | unset | Comma-separated `<db_name>:<db_url>` entries to add on startup. |
+| `REMOVE_DATABASES` | unset | Comma-separated database names to remove on startup. |
+
+File logging is off by default — the container writes to `stdout`/`stderr`, which you can view with `docker logs`. If you also want log files on the host, enable file logging and mount the logs directory:
 
 ```bash
 docker run -d \
-  -v /srv/cvdupdate:/cvdupdate/database \
-  -v /var/log/cvdupdate:/cvdupdate/logs \
+  -v "$(pwd)/database:/cvdupdate/database" \
+  -v "$(pwd)/logs:/cvdupdate/logs" \
+  -e ENABLE_LOGS=true \
+  cvdupdate:latest
+```
+
+Run as a non-root user (UID 1000) and update once a day at midnight:
+
+```bash
+docker run -d \
+  -v "$(pwd)/database:/cvdupdate/database" \
   -e USER_ID=1000 \
-  cvdupdate:latest
-```
-
-Default update interval is `30 */4 * * *` (see [Cron Example](#cron-example))
-
-You may pass custom update interval in environment variable `CRON`
-
-For example - update every day in 00:00
-
-```bash
-docker run -d \
-  -v /srv/cvdupdate:/cvdupdate/database \
-  -v /var/log/cvdupdate:/cvdupdate/logs \
   -e CRON='0 0 * * *' \
   cvdupdate:latest
-  ```
+```
+
+Pass a command as arguments to run it once and exit, instead of starting the update cron. For example, a single update:
+
+```bash
+docker run --rm \
+  -v "$(pwd)/database:/cvdupdate/database" \
+  cvdupdate:latest cvdupdate update
+```
+
+Any `cvdupdate` command works this way (e.g. `cvdupdate status`, etc).
+
 ## Use Docker Compose
 
-A Docker `compose.yaml` is provided to:
+Example docker `compose.yaml` is provided to:
 1. Regularly update a Docker volume with the latest ClamAV databases.
 2. Serve a database mirror on port 8000 using the Apache webserver. 
-
-Edit the `compose.yaml` file if you need to change the default values:
-
-* Port 8000
-* USER_ID=0
-* CRON=30 */4 * * *
 
 ### Build
 ```bash

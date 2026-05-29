@@ -80,7 +80,9 @@ class CVDUpdate:
         "cdiffs_rotate":  True,
         "cdiffs_to_keep": 30,
 
-        "state_file":     str(Path.home() / ".cvdupdate" / "database" / "state.json"),
+        # Keep the state file out of the served database directory so `cvd serve`
+        # (and any external HTTP server) doesn't expose state metadata.
+        "state_file":     str(Path.home() / ".cvdupdate" / "state.json"),
     }
 
     default_state: dict = {
@@ -265,7 +267,7 @@ class CVDUpdate:
             need_save = True
 
         # --- Migration ---
-        # Rename v1.0.x space-separated keys to current underscore keys
+        # Rename legacy (<= 1.2.0) space-separated keys to current underscore keys
         _key_renames = {
             "nameserver":       "nameservers",
             "max retry":        "max_retries",
@@ -628,6 +630,15 @@ class CVDUpdate:
         '''
         config_nameserver = self.config['nameservers']
         env_nameserver = os.environ.get("CVDUPDATE_NAMESERVERS")
+
+        # Fall back to the deprecated singular variable for backward compatibility.
+        if env_nameserver is None or env_nameserver == "":
+            legacy_nameserver = os.environ.get("CVDUPDATE_NAMESERVER")
+            if legacy_nameserver is not None and legacy_nameserver != "":
+                self.logger.warning(
+                    "CVDUPDATE_NAMESERVER is deprecated; please use CVDUPDATE_NAMESERVERS instead."
+                )
+                env_nameserver = legacy_nameserver
 
         # Environment variable overrides the configuration setting
         if env_nameserver != None and env_nameserver != "":
