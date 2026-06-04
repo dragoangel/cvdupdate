@@ -135,7 +135,7 @@ class AliasedGroup(click.Group):
         commands = []
         for name in self.list_commands(ctx):
             cmd = self.commands.get(name)
-            if cmd is None:
+            if cmd is None or cmd.hidden:
                 continue
             help_text = cmd.get_short_help_str(limit=formatter.width)
             aliases = self._reverse_alias.get(name, [])
@@ -194,15 +194,18 @@ def db_status(config: str, verbose: bool, use_json: bool, db: str):
     m = CVDUpdate(config=config, verbose=verbose)
     if db == "":
         if use_json:
-            print(_json.dumps(m.state, indent=4))
+            state_view = dict(m.state)
+            state_view['dbs'] = m._index_local_databases()
+            print(_json.dumps(state_view, indent=4))
         else:
             m.db_list()
     else:
         if use_json:
-            if db not in m.state['dbs']:
+            dbs = m._index_local_databases()
+            if db not in dbs:
                 m.logger.error(f"No such database: {db}")
                 sys.exit(1)
-            print(_json.dumps(m.state['dbs'][db], indent=4))
+            print(_json.dumps(dbs[db], indent=4))
         else:
             if not m.db_show(db):
                 sys.exit(1)

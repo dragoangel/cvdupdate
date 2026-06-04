@@ -1,4 +1,5 @@
 import json
+import re
 import threading
 import http.client
 from http.server import HTTPServer
@@ -82,6 +83,23 @@ def test_status_single_unknown_json_exits_nonzero(revert_homedir, tmp_path):
     assert result.exit_code == 1
 
 
+def test_status_json_includes_local_dbs(revert_homedir, tmp_path):
+    # A DB file present on disk but not yet in state must appear in both the
+    # text and --json forms (both go through the indexed database view).
+    cfg = _init_config(tmp_path)
+    db_dir = tmp_path / 'database'
+    db_dir.mkdir(exist_ok=True)
+    (db_dir / 'local.hdb').write_bytes(b'signatures')
+
+    result = CliRunner().invoke(cli, ['status', '--config', cfg, '--json'])
+    assert result.exit_code == 0
+    assert 'local.hdb' in json.loads(result.output)['dbs']
+
+    single = CliRunner().invoke(cli, ['status', '--config', cfg, '--json', 'local.hdb'])
+    assert single.exit_code == 0
+    assert json.loads(single.output)['url'] == 'n/a'
+
+
 # --- aliases ---------------------------------------------------------------
 
 def test_short_aliases_resolve(revert_homedir, tmp_path):
@@ -100,6 +118,15 @@ def test_show_is_deprecated_alias_for_status(revert_homedir, tmp_path):
     assert 'deprecated' in _all_output(result).lower()
     # It should still show the requested database.
     assert 'daily.cvd' in result.output
+
+
+def test_show_is_hidden_from_help():
+    result = CliRunner().invoke(cli, ['--help'])
+    assert result.exit_code == 0
+    # `show` is a deprecated hidden alias; it must not be listed as a command.
+    assert not re.search(r'(?m)^\s+show\b', result.output)
+    # sanity: a visible command is still listed
+    assert re.search(r'(?m)^\s+status\b', result.output)
 
 
 def test_show_json_behaves_like_status(revert_homedir, tmp_path):
