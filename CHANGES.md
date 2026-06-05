@@ -8,6 +8,59 @@
 > - Fixed: 🐛
 > - Security: 🛡
 
+## Version 1.3.0
+
+- ➕ Added a `cvd status` command (alias `s`) that reports the status of all
+  databases, or of a single database when given a name. Pass `--json` for
+  machine-readable output. The `cvd list` command (alias `ls`) now prints just
+  the database names — one per line, or a JSON array with `--json` — to make
+  its output easy to parse.
+
+  [GitHub Pull-Request](https://github.com/Cisco-Talos/cvdupdate/pull/88)
+
+- ➕ Added a `--override` flag to `cvd add` so the remote URL of an existing
+  database can be updated without removing and re-adding it.
+
+  [GitHub Pull-Request](https://github.com/Cisco-Talos/cvdupdate/pull/88)
+
+- ➕ The `cvd config set` command now exposes every configuration option, with
+  names normalized to a consistent style (e.g. `--logs-directory`,
+  `--dbs-directory`, `--nameservers`, `--logs-enabled`, `--max-retries`,
+  `--state-file`). Short aliases are now available for the common commands:
+  `status (s)`, `update (u)`, `list (ls)`, `remove (rm)`, `config (cf)`, and
+  `clean (cl)`.
+
+  [GitHub Pull-Request](https://github.com/Cisco-Talos/cvdupdate/pull/88)
+
+- 🌌 File logging is now opt-in. New installations no longer write log files
+  unless logging is enabled with `cvd config set --logs-enabled`, which keeps
+  output quiet for container and systemd usage. Existing v1.2 and older
+  configurations that specified a log directory are migrated with logging
+  left enabled.
+
+  [GitHub Pull-Request](https://github.com/Cisco-Talos/cvdupdate/pull/88)
+
+- ➕ `cvd serve` now accepts port `0`, which lets the OS assign a random free
+  port; the chosen port is logged after binding. The default port is unchanged
+  (`8000`).
+
+  [GitHub Pull-Request](https://github.com/Cisco-Talos/cvdupdate/pull/88)
+
+- 🛡 The `cvd serve` test mirror now hides dot-prefixed files and directories,
+  so hidden files (such as a `.state.json` state file) aren't exposed when
+  serving the database directory.
+
+  [GitHub Pull-Request](https://github.com/Cisco-Talos/cvdupdate/pull/88)
+
+- 👇 Deprecated the `show` command in favor of `status`; the `--logdir`,
+  `--dbdir`, and `--nameserver` options of `config set` in favor of
+  `--logs-directory`, `--dbs-directory`, and `--nameservers`; and the
+  `CVDUPDATE_NAMESERVER` environment variable in favor of
+  `CVDUPDATE_NAMESERVERS`. The deprecated names continue to work, with a
+  warning, and will be removed in a future release.
+
+  [GitHub Pull-Request](https://github.com/Cisco-Talos/cvdupdate/pull/88)
+
 ## Version 1.2.0
 
 - ➕ Support for downloading CVD and CDIFF digital signatures.

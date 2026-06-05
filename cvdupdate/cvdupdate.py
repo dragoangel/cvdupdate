@@ -25,7 +25,6 @@ import logging
 import os
 import platform
 import re
-import subprocess
 import sys
 import time
 import uuid
@@ -69,18 +68,21 @@ class CVDUpdate:
     default_config_path: Path = Path.home() / ".cvdupdate" / "config.json"
 
     default_config: dict = {
-        "nameserver" : "",
-        "max retry" : 3, # No `cvd config set` option to set this, because we don't
-                         # _really_ want people hammering the CDN with partial downloads.
+        "nameservers":    "",
+        "max_retries":    3,
 
-        "log directory" : str(Path.home() / ".cvdupdate" / "logs"),
-        "rotate logs" : True,
-        "# logs to keep" : 30,
+        "logs_enabled":   False,
+        "logs_directory": str(Path.home() / ".cvdupdate" / "logs"),
+        "logs_rotate":    True,
+        "logs_to_keep":   30,
 
-        "db directory" : str(Path.home() / ".cvdupdate" / "database"),
-        "rotate cdiffs" : True,
-        "# cdiffs to keep" : 30,
-        "state file": "",
+        "dbs_directory":  str(Path.home() / ".cvdupdate" / "database"),
+        "cdiffs_rotate":  True,
+        "cdiffs_to_keep": 30,
+
+        # Resolved at load time to "<config dir>/state.json" when not set, so it
+        # stays next to the config (and out of the served database directory).
+        "state_file":     "",
     }
 
     default_state: dict = {
@@ -118,25 +120,40 @@ class CVDUpdate:
     config_path: Path
     config: dict
     state: dict
-    db_dir: Path
-    log_dir: Path
+    dbs_directory: Path
+    logs_directory: Path
     version: str
 
     def __init__(
         self,
-        config: str  = "",
-        log_dir: str = "",
-        db_dir: str  = "",
-        nameserver: str  = "",
-        verbose: bool = False,
+        config: str         = "",
+        nameservers: str    = "",
+        max_retries: int    = 0,
+        logs_enabled: bool  = None,
+        logs_directory: str = "",
+        logs_rotate: bool   = None,
+        logs_to_keep: int   = 0,
+        dbs_directory: str  = "",
+        cdiffs_rotate: bool = None,
+        cdiffs_to_keep: int = 0,
+        state_file: str     = "",
+        verbose: bool       = False,
     ) -> None:
         """
         CVDUpdate class.
 
         Args:
-            log_dir:        path output log.
-            db_dir:         path where databases will be downloaded.
-            verbose:        Enable DEBUG-level logs and other verbose messages.
+            nameservers:    Comma-separated list of DNS nameservers.
+            max_retries:    Maximum number of download retries. Default: 3, must be between 1 and 5.
+            logs_enabled:   Save logs to file. Default: False.
+            logs_directory: Path for log output.
+            logs_rotate:    Rotate log files. Default: True.
+            logs_to_keep:   Number of log files to keep. Default: 30.
+            dbs_directory:  Path where databases will be downloaded.
+            cdiffs_rotate:  Rotate CDIFF files. Default: True.
+            cdiffs_to_keep: Number of CDIFF files to keep. Default: 30.
+            state_file:     Path to the state file.
+            verbose:        Enable DEBUG-level logs. Default: False.
         """
         try:
             self.version = _get_version('cvdupdate')
@@ -145,9 +162,16 @@ class CVDUpdate:
         self.verbose = verbose
         self._read_config(
             config,
-            db_dir,
-            log_dir,
-            nameserver)
+            nameservers,
+            max_retries,
+            logs_enabled,
+            logs_directory,
+            logs_rotate,
+            logs_to_keep,
+            dbs_directory,
+            cdiffs_rotate,
+            cdiffs_to_keep,
+            state_file)
         self._init_logging()
 
     def _init_logging(self) -> None:
@@ -155,23 +179,8 @@ class CVDUpdate:
         Initializes the logging parameters.
         """
         today = datetime.datetime.now()
-        log_file = self.log_dir / f"{today:%Y-%m-%d}.log"
-
-        if not self.log_dir.exists():
-            # Make a new log directory
-            os.makedirs(log_file.parent)
-        else:
-            # Log dir already exists, lets check if we need to prune old logs
-            logs = self.log_dir.glob('*.log')
-            for log in logs:
-                log_date_str = str(log.stem)
-                log_date = datetime.datetime.strptime(log_date_str, "%Y-%m-%d")
-                if log_date + datetime.timedelta(days=self.config["# logs to keep"]) < today:
-                    # Log is too old, delete!
-                    os.remove(str(log))
 
         stderr_level = logging.WARNING
-
         stderr_handler = logging.StreamHandler(sys.stderr)
         stderr_handler.setLevel(stderr_level)
 
@@ -182,16 +191,27 @@ class CVDUpdate:
         stdout_handler = logging.StreamHandler(sys.stdout)
         stdout_handler.addFilter(FilterNotStdErr())
 
+        handlers: list = [stderr_handler, stdout_handler]
+
+        if self.config["logs_enabled"]:
+            log_file = self.logs_directory / f"{today:%Y-%m-%d}.log"
+
+            if not self.logs_directory.exists():
+                os.makedirs(self.logs_directory)
+            elif self.config["logs_rotate"]:
+                for log in self.logs_directory.glob('*.log'):
+                    log_date = datetime.datetime.strptime(log.stem, "%Y-%m-%d")
+                    if log_date + datetime.timedelta(days=self.config["logs_to_keep"]) < today:
+                        os.remove(str(log))
+
+            handlers.append(logging.FileHandler(log_file))
+
         logging.basicConfig(
             level=logging.DEBUG if self.verbose else logging.INFO,
             format="%(asctime)s - %(levelname)s:  %(message)s",
             datefmt="%Y-%m-%d %I:%M:%S %p",
             force=True,  # an import might already have the root logger configured
-            handlers=[
-                stderr_handler,
-                stdout_handler,
-                logging.FileHandler(log_file),
-            ],
+            handlers=handlers,
         )
 
         self.logger = logging.getLogger(f"cvdupdate-{self.version}")
@@ -203,9 +223,16 @@ class CVDUpdate:
 
     def _read_config(self,
                      config: str,
-                     db_dir: str,
-                     log_dir: str,
-                     nameserver: str) -> None:
+                     nameservers: str,
+                     max_retries: int,
+                     logs_enabled: Optional[bool],
+                     logs_directory: str,
+                     logs_rotate: Optional[bool],
+                     logs_to_keep: int,
+                     dbs_directory: str,
+                     cdiffs_rotate: Optional[bool],
+                     cdiffs_to_keep: int,
+                     state_file: str) -> None:
         """
         Read in the config file.
         Create a new one if one does not already exist.
@@ -226,56 +253,99 @@ class CVDUpdate:
             self.config = copy.deepcopy(self.default_config)
             need_save = True
 
-        if db_dir != "":
-            self.config["db directory"] = db_dir
-            need_save = True
-        self.db_dir = Path(self.config["db directory"])
-
-        if log_dir != "":
-            self.config["log directory"] = log_dir
-            need_save = True
-        self.log_dir = Path(self.config["log directory"])
-
-        if nameserver != "":
-            self.config['nameserver'] = nameserver
-            need_save = True
-
-        # For backwards compatibility with older configs.
-        if 'nameserver' not in self.config:
-            self.config['nameserver'] = ""
-            need_save = True
-        if 'max retry' not in self.config:
-            self.config['max retry'] = 3
-            need_save = True
-
-        if not hasattr(self, 'state'):
-            self.state = {}
-
-        # keep database state in a separate file, defaulting to same dir as config file
-        if 'state file' not in self.config or self.config['state file'] == '':
-            self.config['state file'] = str(self.config_path.parent / "state.json")
-            need_save = True
-
-        # handle migration from config.json to state.json
-        if 'dbs' in self.config:
-            self.state['dbs'] = self.config['dbs']
-            del self.config['dbs']
-
-        if 'uuid' in self.config:
-            self.state['uuid'] = self.config['uuid']
-            del self.config['uuid']
-
-        state_file = Path(self.config['state file'])
-        if state_file.exists():
-            # state file exists, load it.
-            with state_file.open('r') as st_fi:
+        # Resolve the state file location and load state early to apply
+        # migration in one block. Support both old ("state file") and new
+        # ("state_file") key names. When not configured, default it next to the
+        # config file (matches <= 1.2.0: custom --config paths get a colocated
+        # state file) and out of the served database directory.
+        state_file_str = self.config.get("state_file") or self.config.get("state file")
+        if not state_file_str:
+            state_file_str = str(self.config_path.parent / "state.json")
+        self.config["state_file"] = state_file_str
+        state_path = Path(state_file_str)
+        if state_path.exists():
+            with state_path.open('r') as st_fi:
                 self.state = json.load(st_fi)
-        elif self.state == {} or 'dbs' not in self.state:
-            # state file does not exist
-            # so we either have a fresh install or we have a messed up json
-            # create a skeleton structure
+        else:
             self.state = copy.deepcopy(self.default_state)
             need_save = True
+
+        # --- Migration ---
+        # Rename legacy (<= 1.2.0) space-separated keys to current underscore keys
+        _key_renames = {
+            "nameserver":       "nameservers",
+            "max retry":        "max_retries",
+            "log directory":    "logs_directory",
+            "rotate logs":      "logs_rotate",
+            "# logs to keep":   "logs_to_keep",
+            "db directory":     "dbs_directory",
+            "rotate cdiffs":    "cdiffs_rotate",
+            "# cdiffs to keep": "cdiffs_to_keep",
+            "state file":       "state_file",
+        }
+        for old_key, new_key in _key_renames.items():
+            # Ensure that if the old config had a "log directory" key, we also set "logs_enabled" to True for backward compatibility.
+            if old_key in self.config and old_key == "log directory":
+                self.config["logs_enabled"] = True
+            # Migrate from old key names to new one, but only if the old key exists and the new key doesn't already exist,
+            # to avoid overwriting any user-provided config values that are already in the new format.
+            if old_key in self.config:
+                if new_key not in self.config:
+                    self.config[new_key] = self.config[old_key]
+                del self.config[old_key]
+                need_save = True
+
+        # Fill in any new config keys absent from older configs
+        for key, default_val in self.default_config.items():
+            if key not in self.config:
+                self.config[key] = default_val
+                need_save = True
+
+        # Move dbs and uuid out of config into state
+        if 'dbs' in self.config:
+            self.state['dbs'] = self.config.pop('dbs')
+            need_save = True
+        if 'uuid' in self.config:
+            self.state['uuid'] = self.config.pop('uuid')
+            need_save = True
+        # --- End Migration ---
+
+        if nameservers != "":
+            self.config["nameservers"] = nameservers
+            need_save = True
+        if max_retries != 0:
+            self.config["max_retries"] = max_retries
+            need_save = True
+        if not 1 <= self.config["max_retries"] <= 5:
+            self.config["max_retries"] = self.default_config["max_retries"]
+            need_save = True
+        if logs_enabled is not None:
+            self.config["logs_enabled"] = logs_enabled
+            need_save = True
+        if logs_directory != "":
+            self.config["logs_directory"] = logs_directory
+            need_save = True
+        if logs_rotate is not None:
+            self.config["logs_rotate"] = logs_rotate
+            need_save = True
+        if logs_to_keep != 0:
+            self.config["logs_to_keep"] = logs_to_keep
+            need_save = True
+        if dbs_directory != "":
+            self.config["dbs_directory"] = dbs_directory
+            need_save = True
+        if cdiffs_rotate is not None:
+            self.config["cdiffs_rotate"] = cdiffs_rotate
+            need_save = True
+        if cdiffs_to_keep != 0:
+            self.config["cdiffs_to_keep"] = cdiffs_to_keep
+            need_save = True
+        if state_file != "":
+            self.config["state_file"] = state_file
+            need_save = True
+
+        self.dbs_directory = Path(self.config["dbs_directory"])
+        self.logs_directory = Path(self.config["logs_directory"])
 
         if 'uuid' not in self.state:
             # Create a UUID to put in our User-Agent for better (anonymous) metrics
@@ -289,7 +359,7 @@ class CVDUpdate:
         """
         Save the current configuration.
         """
-        for fi in (self.config_path, Path(self.config['state file'])):
+        for fi in (self.config_path, Path(self.config['state_file'])):
             if not fi.parent.exists():
                 # parent directory doesn't exist yet
                 try:
@@ -306,7 +376,7 @@ class CVDUpdate:
             raise exc
 
         try:
-            with open(self.config['state file'], 'w') as state_file:
+            with open(self.config['state_file'], 'w') as state_file:
                 json.dump(self.state, state_file, indent=4)
         except Exception as exc:
             print("Failed to create state file!")
@@ -314,21 +384,7 @@ class CVDUpdate:
 
         if self.verbose:
             print(f"Saved: {self.config_path}\n")
-            print(f"Saved: {self.config['state file']}\n")
-
-    def config_show(self):
-        """
-        Print out the config
-        """
-        print(f"Config file: {self.config_path}\n")
-        print(f"Config:\n{json.dumps(self.config, indent=4)}\n")
-        print(f"State file: {self.config['state file']}\n")
-        print(f"State:\n{json.dumps(self.state, indent=4)}\n")
-
-    def update(self, db: str = "") -> bool:
-        """
-        Update a specific database or all the databases.
-        """
+            print(f"Saved: {self.config['state_file']}\n")
 
     def clean_dbs(self):
         """
@@ -336,7 +392,7 @@ class CVDUpdate:
         """
         dbs = self.state['dbs'].keys()
         for db in dbs:
-            cvddb = self.db_dir / db
+            cvddb = self.dbs_directory / db
             if cvddb.exists():
                 try:
                     self.logger.info(f"Deleting: {db}")
@@ -351,7 +407,7 @@ class CVDUpdate:
                     raise exc
 
         # Remove / clear all CDIFFs
-        cdiff_files = self.db_dir.glob('*.cdiff')
+        cdiff_files = self.dbs_directory.glob('*.cdiff')
         for cdiff in cdiff_files:
             try:
                 self.logger.info(f"Deleting CDIFF: {cdiff.name}")
@@ -379,7 +435,7 @@ class CVDUpdate:
         Delete all files in the log directory.
         """
         self.logger.info(f"Deleting log files...")
-        logs = self.log_dir.glob('*')
+        logs = self.logs_directory.glob('*')
         for log in logs:
             os.remove(str(log))
             print(f"Deleted: {log}")
@@ -394,15 +450,23 @@ class CVDUpdate:
 
         os.remove(str(self.config_path))
         print(f"Deleted: {self.config_path}")
-        os.remove(str(self.config['state file']))
-        print(f"Deleted: {self.config['state file']}")
+        os.remove(str(self.config['state_file']))
+        print(f"Deleted: {self.config['state_file']}")
 
     def _index_local_databases(self) -> dict:
         need_save = False
         dbs = copy.deepcopy(self.state['dbs'])
 
-        db_paths = self.db_dir.glob('*')
+        db_paths = self.dbs_directory.glob('*')
         for db in db_paths:
+            if db.name == 'dns.txt':
+                continue
+            if db.name.endswith('.json'):
+                # Ignore JSON files, which are probably configs or state files.
+                continue
+            if db.name.startswith('.'):
+                # Ignore hidden files (e.g. .DS_Store, .gitkeep).
+                continue
             if db.name.endswith('.cdiff') or db.name.endswith('.sign'):
                 # Ignore CDIFFs and sign files, they'll get printed later.
                 continue
@@ -437,7 +501,7 @@ class CVDUpdate:
                     # saving the CVD info to the config. Let's just update the version field.
                     self.logger.info(f"Found {db.name} in the DB directory, though it wasn't downloaded using this tool.")
                     try:
-                        dbs[db.name]['local version'] = self._get_cvd_version_from_file(self.db_dir / db.name)
+                        dbs[db.name]['local version'] = self._get_cvd_version_from_file(self.dbs_directory / db.name)
                         self.logger.info(f"Identified mysterious {db.name} version: {dbs[db.name]['local version']}")
 
                         # Add the version info for this mysteriously deposited CVD to our config.
@@ -570,12 +634,21 @@ class CVDUpdate:
         '''
         Determine user provided nameserver configuration
         '''
-        config_nameserver = self.config['nameserver']
-        env_nameserver = os.environ.get("CVDUPDATE_NAMESERVER")
+        config_nameserver = self.config['nameservers']
+        env_nameserver = os.environ.get("CVDUPDATE_NAMESERVERS")
+
+        # Fall back to the deprecated singular variable for backward compatibility.
+        if env_nameserver is None or env_nameserver == "":
+            legacy_nameserver = os.environ.get("CVDUPDATE_NAMESERVER")
+            if legacy_nameserver is not None and legacy_nameserver != "":
+                self.logger.warning(
+                    "CVDUPDATE_NAMESERVER is deprecated; please use CVDUPDATE_NAMESERVERS instead."
+                )
+                env_nameserver = legacy_nameserver
 
         # Environment variable overrides the configuration setting
         if env_nameserver != None and env_nameserver != "":
-            self.logger.info(f"Found CVDUPDATE_NAMESERVER environment variable to provide nameservers: {env_nameserver}")
+            self.logger.info(f"Found CVDUPDATE_NAMESERVERS environment variable to provide nameservers: {env_nameserver}")
             return env_nameserver
         elif config_nameserver != None and config_nameserver != "":
             self.logger.info(f"Found configuration provided nameservers: {config_nameserver}")
@@ -592,7 +665,7 @@ class CVDUpdate:
 
         if self.dns_version_tokens == []:
             # Query DNS if we haven't already
-            for _attempt in range(self.config['max retry']):
+            for _attempt in range(self.config['max_retries']):
                 if self._query_dns_txt_entry():
                     break
                 # Pause before next attempt.
@@ -638,7 +711,7 @@ class CVDUpdate:
 
         retry = 0
         response = None
-        while retry < self.config['max retry']:
+        while retry < self.config['max_retries']:
             response = requests.get(url, headers = {
                 'User-Agent': f'CVDUPDATE/{self.version} ({self.state["uuid"]})',
                 'Range': 'bytes=0-95',
@@ -710,7 +783,7 @@ class CVDUpdate:
 
         retry = 0
         response = None
-        while retry < self.config['max retry']:
+        while retry < self.config['max_retries']:
             response = requests.get(url, headers = {
                 'User-Agent': f'CVDUPDATE/{self.version} ({self.state["uuid"]})',
                 'If-Modified-Since': ims,
@@ -742,7 +815,7 @@ class CVDUpdate:
                 self.logger.info(f"Downloaded {db}")
 
             try:
-                with (self.db_dir / db).open('wb') as new_db:
+                with (self.dbs_directory / db).open('wb') as new_db:
                     new_db.write(response.content)
 
                 # Update config w/ new db info
@@ -752,7 +825,7 @@ class CVDUpdate:
 
             except Exception as exc:
                 self.logger.debug(f"EXCEPTION OCCURRED: {exc}")
-                self.logger.error(f"Failed to save {db} to {self.db_dir}")
+                self.logger.error(f"Failed to save {db} to {self.dbs_directory}")
                 return CvdStatus.ERROR
 
         elif response.status_code == 304:
@@ -816,7 +889,7 @@ class CVDUpdate:
 
         retry = 0
         response = None
-        while retry < self.config['max retry']:
+        while retry < self.config['max_retries']:
             response = requests.get(url, headers = {
                 'User-Agent': f'CVDUPDATE/{self.version} ({self.state["uuid"]})',
             })
@@ -843,19 +916,19 @@ class CVDUpdate:
             # Download Success
             self.logger.info(f"Downloaded {file}")
             try:
-                with (self.db_dir / f"{file}").open('wb') as new_db:
+                with (self.dbs_directory / f"{file}").open('wb') as new_db:
                     new_db.write(response.content)
             except Exception as exc:
                 self.logger.debug(f"EXCEPTION OCCURRED: {exc}")
-                self.logger.error(f"Failed to save {file} to {self.db_dir}.")
+                self.logger.error(f"Failed to save {file} to {self.dbs_directory}.")
 
             # Update config with CDIFF, for posterity
             self.state['dbs'][db]['CDIFFs'].append(file)
 
             # Prune old CDIFFs if needed
-            if len(self.state['dbs'][db]['CDIFFs']) > self.config['# cdiffs to keep']:
+            if len(self.state['dbs'][db]['CDIFFs']) > self.config['cdiffs_to_keep']:
                 try:
-                    os.remove(self.db_dir / self.state['dbs'][db]['CDIFFs'][0])
+                    os.remove(self.dbs_directory / self.state['dbs'][db]['CDIFFs'][0])
                 except Exception as exc:
                     self.logger.debug(f"EXCEPTION OCCURRED: {exc}")
                     self.logger.debug(f"Tried to prune old cdiffs, but they weren't found, maybe someone else removed them already.")
@@ -916,7 +989,7 @@ class CVDUpdate:
             sign_file = f"{file_name}-{version}.{ext}.sign"
 
         # check if we already have it.
-        if (self.db_dir / sign_file).exists():
+        if (self.dbs_directory / sign_file).exists():
             self.logger.debug(f"We already have {sign_file}. Skipping...")
             return CvdStatus.NO_UPDATE
 
@@ -926,7 +999,7 @@ class CVDUpdate:
 
         retry = 0
         response = None
-        while retry < self.config['max retry']:
+        while retry < self.config['max_retries']:
             response = requests.get(url, headers = {
                 'User-Agent': f'CVDUPDATE/{self.version} ({self.state["uuid"]})',
                 'If-Modified-Since': ims,
@@ -958,12 +1031,12 @@ class CVDUpdate:
                 self.logger.info(f"Downloaded {sign_file}")
 
             try:
-                with (self.db_dir / sign_file).open('wb') as new_db:
+                with (self.dbs_directory / sign_file).open('wb') as new_db:
                     new_db.write(response.content)
 
             except Exception as exc:
                 self.logger.debug(f"EXCEPTION OCCURRED: {exc}")
-                self.logger.error(f"Failed to save {sign_file} to {self.db_dir}")
+                self.logger.error(f"Failed to save {sign_file} to {self.dbs_directory}")
                 return CvdStatus.ERROR
 
         elif response.status_code == 304:
@@ -1023,7 +1096,7 @@ class CVDUpdate:
             #   https://database.clamav.net/daily-<version>.cdiff
             cdiff_file = f"{db[:-len('.cvd')]}-{desired_version}.cdiff"
 
-            if (self.db_dir / cdiff_file).exists():
+            if (self.dbs_directory / cdiff_file).exists():
                 self.logger.debug(f"We already have {cdiff_file}. Skipping...")
                 desired_version += 1
                 continue
@@ -1148,8 +1221,8 @@ class CVDUpdate:
         self.dns_version_tokens = []
 
         # Make sure we have a database directory to save files to
-        if not self.db_dir.exists():
-            os.makedirs(self.db_dir)
+        if not self.dbs_directory.exists():
+            os.makedirs(self.dbs_directory)
 
         # Check if there is a newer version of CVD-Update
         self.pypi_update_check()
@@ -1189,11 +1262,11 @@ class CVDUpdate:
                 # It's a CVD (official signed clamav database)
                 advertised_version = 0
 
-                if (self.db_dir / db).exists():
+                if (self.dbs_directory / db).exists():
                     if self.state['dbs'][db]['local version'] == 0:
                         # Seems like we somehow got a CVD in our database directory without
                         # saving the CVD info to the config. Let's just update the version field.
-                        self.state['dbs'][db]['local version'] = self._get_cvd_version_from_file(self.db_dir / db)
+                        self.state['dbs'][db]['local version'] = self._get_cvd_version_from_file(self.dbs_directory / db)
                 else:
                     if self.state['dbs'][db]['local version'] != 0:
                         # We have a local version but no CVD in the database directory.
@@ -1257,15 +1330,16 @@ class CVDUpdate:
         self._save_config()
 
         if self.update_errors == 0 and self.dbs_updated > 0:
-            with (self.db_dir / 'dns.txt').open('w') as dns_file:
+            with (self.dbs_directory / 'dns.txt').open('w') as dns_file:
                 dns_file.write(':'.join(self.dns_version_tokens))
-            self.logger.debug(f"Updated {self.db_dir / 'dns.txt'}")
+            self.logger.debug(f"Updated {self.dbs_directory / 'dns.txt'}")
 
         return self.update_errors
 
-    def config_add_db(self, db: str, url: str) -> bool:
+    def config_add_db(self, db: str, url: str, override: bool = False) -> bool:
         """
         Add another database + url to check when we update.
+        If override is True and the db already exists, update its URL.
         """
         extension = db.split('.')[-1]
         if extension not in [
@@ -1285,10 +1359,19 @@ class CVDUpdate:
             ]:
             self.logger.warning(f"{db} does not have valid clamav database file extension.")
 
-        if db in self.state['dbs']:
+        cmd = sys.argv[0]
+
+        if db in self.state['dbs'] and not override:
             self.logger.info(f"Cannot add {db}, it is already in our list.")
-            self.logger.info(f"Hint: Try `db list -V` or `db show {db}` for more information.")
+            self.logger.info(f"Hint: Try `{cmd} status {db}` for more information, use `{cmd} add --override {db} <url>` to update the URL.")
             return False
+
+        if db in self.state['dbs'] and override:
+            old_url = self.state['dbs'][db]['url']
+            self.state['dbs'][db]['url'] = url
+            self.logger.info(f"Updated URL for {db}: {old_url} -> {url}")
+            self._save_config()
+            return True
 
         self.state['dbs'][db] = {
             "url" : url,
@@ -1301,7 +1384,7 @@ class CVDUpdate:
         }
 
         self.logger.info(f"Added {db} ({url}) to DB list.")
-        self.logger.info(f"{db} will be downloaded next time you run `cvd update` or `cvd update {db}`")
+        self.logger.info(f"{db} will be downloaded next time you run `{cmd} update` or `{cmd} update {db}`")
 
         self._save_config()
 
@@ -1312,13 +1395,14 @@ class CVDUpdate:
         Remove a database from our list, and delete copies of the DB from the database directory.
         """
         if db not in self.state['dbs']:
+            cmd = sys.argv[0]
             self.logger.info(f"Cannot remove {db}, it is not in our list.")
-            self.logger.info(f"Hint: Try `db list -V` for more information.")
+            self.logger.info(f"Hint: Try `{cmd} status` for more information.")
             return False
 
         try:
-            if (self.db_dir / db).exists():
-                os.remove(str(self.db_dir / db))
+            if (self.dbs_directory / db).exists():
+                os.remove(str(self.dbs_directory / db))
                 self.logger.info(f"Deleted {db} from database directory.")
 
         except Exception as exc:
@@ -1327,8 +1411,8 @@ class CVDUpdate:
 
         for cdiff in self.state['dbs'][db]['CDIFFs']:
             try:
-                if (self.db_dir / cdiff).exists():
-                    os.remove(str(self.db_dir / cdiff))
+                if (self.dbs_directory / cdiff).exists():
+                    os.remove(str(self.dbs_directory / cdiff))
                     self.logger.info(f"Deleted {cdiff} from database directory.")
 
             except Exception as exc:
