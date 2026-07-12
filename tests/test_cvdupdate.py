@@ -1,10 +1,12 @@
 import json
 import datetime
+import socket
 from pathlib import Path
+from typing import Any
 
 from tests.fixtures.revert import revert_homedir
 
-from cvdupdate.cvdupdate import CVDUpdate
+from cvdupdate.cvdupdate import CVDUpdate, CvdStatus
 
 def test_instantiation(revert_homedir):
     c = CVDUpdate()
@@ -156,3 +158,78 @@ def test_v1_config_migrates_successfully(revert_homedir):
     with Path(disk_config['state_file']).open() as f:
         disk_state = json.load(f)
     assert disk_state == a.state
+
+
+def test_sign_download_uses_origin_name_for_url_and_local_name_for_file(revert_homedir, tmp_path, monkeypatch):
+    db_dir = tmp_path / 'db'
+    db_dir.mkdir()
+
+    c = CVDUpdate(
+        config=str(tmp_path / 'config.json'),
+        state_file=str(tmp_path / 'state.json'),
+        dbs_directory=str(db_dir),
+    )
+
+    called = {}
+
+    class FakeResponse:
+        status_code = 200
+        content = b'sigdata'
+        headers = {'content-length': str(len(content))}
+
+    def fake_get(url, headers):
+        called['url'] = url
+        called['headers'] = headers
+        return FakeResponse()
+
+    def fail_network(*args, **kwargs):
+        raise AssertionError('Real network usage is forbidden in this test')
+
+    local_sign_path = db_dir / 'local-main.cvd.sign'
+    real_exists = Path.exists
+    real_open = Path.open
+    wrote: dict[str, Any] = {}
+
+    class FakeBinaryWriter:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def write(self, data: bytes) -> int:
+            wrote['data'] = data
+            return len(data)
+
+    def fake_exists(self):
+        if self == local_sign_path:
+            # Force the code path that performs the download + save.
+            return False
+        return real_exists(self)
+
+    def fake_open(self, mode='r', *args, **kwargs):
+        if self == local_sign_path and mode == 'wb':
+            wrote['opened'] = True
+            return FakeBinaryWriter()
+        return real_open(self, mode, *args, **kwargs)
+
+    monkeypatch.setattr('cvdupdate.cvdupdate.requests.get', fake_get)
+    # Hard guard: if anything tries to open a real socket.
+    monkeypatch.setattr(socket.socket, 'connect', fail_network)
+    monkeypatch.setattr(socket.socket, 'connect_ex', fail_network)
+    monkeypatch.setattr(Path, 'exists', fake_exists)
+    monkeypatch.setattr(Path, 'open', fake_open)
+
+    status = c._download_sign_file_for(
+        file='local-main.cvd',
+        file_url='https://database.clamav.net/main.cvd?version=12345',
+        last_modified=0,
+        version=12345,
+    )
+
+    assert status == CvdStatus.UPDATED
+    assert called['url'] == 'https://database.clamav.net/main-12345.cvd.sign'
+    assert wrote['opened'] is True
+    assert wrote['data'] == b'sigdata'
+    # Confirm no file was actually created by this test.
+    assert not real_exists(local_sign_path)
