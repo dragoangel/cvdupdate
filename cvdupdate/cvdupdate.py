@@ -927,8 +927,12 @@ class CVDUpdate:
 
             # Prune old CDIFFs if needed
             if len(self.state['dbs'][db]['CDIFFs']) > self.config['cdiffs_to_keep']:
+                oldest_cdiff = self.dbs_directory / self.state['dbs'][db]['CDIFFs'][0]
                 try:
-                    os.remove(self.dbs_directory / self.state['dbs'][db]['CDIFFs'][0])
+                    os.remove(oldest_cdiff)
+                    oldest_cdiff_sign = Path(str(oldest_cdiff) + ".sign")
+                    if oldest_cdiff_sign.exists():
+                        os.remove(oldest_cdiff_sign)
                 except Exception as exc:
                     self.logger.debug(f"EXCEPTION OCCURRED: {exc}")
                     self.logger.debug(f"Tried to prune old cdiffs, but they weren't found, maybe someone else removed them already.")
@@ -1409,9 +1413,14 @@ class CVDUpdate:
             return False
 
         try:
-            if (self.dbs_directory / db).exists():
-                os.remove(str(self.dbs_directory / db))
+            db_path = self.dbs_directory / db
+            if db_path.exists():
+                os.remove(str(db_path))
                 self.logger.info(f"Deleted {db} from database directory.")
+                db_sign_path = Path(str(db_path) + ".sign")
+                if db_sign_path.exists():
+                    os.remove(str(db_sign_path))
+                    self.logger.info(f"Deleted {db}.sign from database directory.")
 
         except Exception as exc:
             self.logger.debug(f"An exception occured: {exc}")
@@ -1419,9 +1428,14 @@ class CVDUpdate:
 
         for cdiff in self.state['dbs'][db]['CDIFFs']:
             try:
-                if (self.dbs_directory / cdiff).exists():
-                    os.remove(str(self.dbs_directory / cdiff))
+                cdiff_path = self.dbs_directory / cdiff
+                if cdiff_path.exists():
+                    os.remove(str(cdiff_path))
                     self.logger.info(f"Deleted {cdiff} from database directory.")
+                    cdiff_sign_path = Path(str(cdiff_path) + ".sign")
+                    if cdiff_sign_path.exists():
+                        os.remove(str(cdiff_sign_path))
+                        self.logger.info(f"Deleted {cdiff}.sign from database directory.")
 
             except Exception as exc:
                 self.logger.debug(f"An exception occured: {exc}")

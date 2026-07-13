@@ -22,6 +22,12 @@
 
   [GitHub Pull-Request](https://github.com/Cisco-Talos/cvdupdate/pull/92)
 
+- 🐛 Fixed cleanup so pruning an old `.cdiff` or removing a database also
+  deletes its matching `.sign` file, keeping rotated files fully removed from
+  the mirror.
+
+  [GitHub Pull-Request](https://github.com/Cisco-Talos/cvdupdate/pull/92)
+
 ## Version 1.3.0
 
 - ➕ Added a `cvd status` command (alias `s`) that reports the status of all

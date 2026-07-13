@@ -233,3 +233,80 @@ def test_sign_download_uses_origin_name_for_url_and_local_name_for_file(revert_h
     assert wrote['data'] == b'sigdata'
     # Confirm no file was actually created by this test.
     assert not real_exists(local_sign_path)
+
+
+def test_cdiff_rotation_removes_matching_sign_file(revert_homedir, tmp_path, monkeypatch):
+    db_dir = tmp_path / 'db'
+    db_dir.mkdir()
+
+    c = CVDUpdate(
+        config=str(tmp_path / 'config.json'),
+        state_file=str(tmp_path / 'state.json'),
+        dbs_directory=str(db_dir),
+        cdiffs_to_keep=1,
+    )
+
+    class FakeResponse:
+        status_code = 200
+        headers = {'content-length': '7'}
+        content = b'cdiff-1'
+
+    requested_urls = []
+
+    def fake_get(url, headers):
+        requested_urls.append(url)
+        return FakeResponse()
+
+    monkeypatch.setattr('cvdupdate.cvdupdate.requests.get', fake_get)
+
+    first_cdiff = db_dir / 'daily-1.cdiff'
+    first_sign = db_dir / 'daily-1.cdiff.sign'
+    first_cdiff.write_bytes(b'cdiff-1')
+    first_sign.write_bytes(b'sign-1')
+    c.state['dbs']['daily.cvd']['CDIFFs'] = ['daily-1.cdiff']
+
+    result = c._download_cdiff(
+        db='daily.cvd',
+        file='daily-2.cdiff',
+        db_url='https://database.clamav.net/daily.cvd',
+        last_modified=0,
+        desired_version=2,
+        available_version=2,
+    )
+
+    assert result == CvdStatus.UPDATED
+    assert not first_cdiff.exists()
+    assert not first_sign.exists()
+    assert (db_dir / 'daily-2.cdiff').exists()
+    assert c.state['dbs']['daily.cvd']['CDIFFs'] == ['daily-2.cdiff']
+    assert requested_urls == ['https://database.clamav.net/daily-2.cdiff']
+
+
+def test_config_remove_db_removes_database_and_related_sign_files(revert_homedir, tmp_path):
+    db_dir = tmp_path / 'db'
+    db_dir.mkdir()
+
+    c = CVDUpdate(
+        config=str(tmp_path / 'config.json'),
+        state_file=str(tmp_path / 'state.json'),
+        dbs_directory=str(db_dir),
+    )
+
+    db_path = db_dir / 'daily.cvd'
+    db_sign_path = db_dir / 'daily.cvd.sign'
+    cdiff_path = db_dir / 'daily-1.cdiff'
+    cdiff_sign_path = db_dir / 'daily-1.cdiff.sign'
+
+    db_path.write_bytes(b'db')
+    db_sign_path.write_bytes(b'db-sign')
+    cdiff_path.write_bytes(b'cdiff')
+    cdiff_sign_path.write_bytes(b'cdiff-sign')
+    c.state['dbs']['daily.cvd']['CDIFFs'] = ['daily-1.cdiff']
+
+    assert c.config_remove_db('daily.cvd') is True
+
+    assert not db_path.exists()
+    assert not db_sign_path.exists()
+    assert not cdiff_path.exists()
+    assert not cdiff_sign_path.exists()
+    assert 'daily.cvd' not in c.state['dbs']
